@@ -1,0 +1,10 @@
+# Aplikasi utama: Smart QC Buah versi Streamlit.
+# Versi lama (FastAPI) memakai requirements-fastapi.txt.
+streamlit>=1.40
+streamlit-webrtc>=0.60
+av
+ultralytics
+opencv-python-headless
+numpy
+pandas
+openpyxl
