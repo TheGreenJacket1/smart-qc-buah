@@ -120,6 +120,33 @@ def test_stats_and_exports(env, monkeypatch):
     assert app.export_bytes("csv", rows)[0].decode().count("\n") == 3
     assert len(app.det_query(label="banana")) == 1
     assert app.export_bytes("xlsx", rows)[0][:2] == b"PK"
+    assert app.det_count() == len(rows)
+    assert app.det_count(label="banana") == len(app.det_query(label="banana"))
+    assert app.det_count(min_conf=0.9) == 1
+    for fmt, (mime, fname) in app.EXPORT_META.items():
+        assert app.export_bytes(fmt, [])[1:] == (mime, fname)
+
+
+def test_deferred_export_only_queries_when_called(env, monkeypatch):
+    stub(monkeypatch, [(0, 0.95, [1, 2, 3, 4])])
+    detect()
+    calls = []
+    real_query = app.det_query
+
+    def counting_query(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real_query(*args, **kwargs)
+
+    monkeypatch.setattr(app, "det_query", counting_query)
+    job = app.deferred_export("csv", min_conf=0.9)
+    assert calls == []
+    data = job()
+    assert len(calls) == 1 and calls[0][0][1] == 0.9
+    assert b"scan_id" in data and b"apple" in data
+    assert app.deferred_export("json", min_conf=0.9)().startswith(b"[")
+    assert app.deferred_export("xlsx", min_conf=0.9)()[:2] == b"PK"
+    with pytest.raises(app.AppError):
+        app.deferred_export("pdf")
 
 
 def test_feedback_kept_when_review_copy_fails(env, monkeypatch):

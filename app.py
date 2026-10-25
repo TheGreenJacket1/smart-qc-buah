@@ -23,7 +23,7 @@ import time
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import cv2
 import numpy as np
@@ -321,13 +321,18 @@ def history(sort_by="timestamp", order="desc", status: Optional[str] = None,
     return {"total": total, "items": [dict(r) for r in rows]}
 
 
-def det_query(label=None, min_conf=0.0, sort_by="timestamp", order="desc", limit=None, offset=0):
-    if sort_by not in DET_SORT:
-        raise AppError(f"sort_by harus salah satu dari {list(DET_SORT)}")
+def _det_filter(label=None, min_conf=0.0) -> tuple[list[str], list]:
     cond, params = ["d.confidence>=?"], [min_conf]
     if label:
         cond.append("(d.label=? OR d.fruit=?)")
         params += [label, label]
+    return cond, params
+
+
+def det_query(label=None, min_conf=0.0, sort_by="timestamp", order="desc", limit=None, offset=0):
+    if sort_by not in DET_SORT:
+        raise AppError(f"sort_by harus salah satu dari {list(DET_SORT)}")
+    cond, params = _det_filter(label, min_conf)
     sql = ("SELECT d.id, d.scan_id, d.ts, s.filename, d.label, d.fruit, d.condition, d.confidence, "
            "d.x1, d.y1, d.x2, d.y2 FROM detections d JOIN scans s ON s.id=d.scan_id "
            f"WHERE {' AND '.join(cond)} ORDER BY {DET_SORT[sort_by]} {check_order(order)}, d.id DESC")
@@ -336,6 +341,15 @@ def det_query(label=None, min_conf=0.0, sort_by="timestamp", order="desc", limit
         params += [limit, offset]
     with closing(db()) as con:
         return [dict(r) for r in con.execute(sql, params).fetchall()]
+
+
+def det_count(label=None, min_conf=0.0) -> int:
+    """Jumlah baris ekspor tanpa memuat seluruh data ke memori."""
+    cond, params = _det_filter(label, min_conf)
+    with closing(db()) as con:
+        return con.execute(
+            "SELECT COUNT(*) FROM detections d JOIN scans s ON s.id=d.scan_id "
+            f"WHERE {' AND '.join(cond)}", params).fetchone()[0]
 
 
 def stats() -> dict:
@@ -361,6 +375,11 @@ def stats() -> dict:
 
 EXPORT_COLS = ["scan_id", "ts", "filename", "label", "fruit", "condition", "confidence",
                "x1", "y1", "x2", "y2"]
+EXPORT_META = {
+    "csv": ("text/csv", "deteksi.csv"),
+    "xlsx": ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "deteksi.xlsx"),
+    "json": ("application/json", "deteksi.json"),
+}
 FORMULA_PREFIX = ("=", "+", "-", "@", "\t", "\r")
 
 
@@ -400,6 +419,22 @@ def export_bytes(fmt: str, rows: list[dict]) -> tuple[bytes, str, str]:
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 "deteksi.xlsx")
     raise AppError("format harus csv, json, atau xlsx")
+
+
+def deferred_export(fmt: str, label=None, min_conf=0.0,
+                    sort_by="timestamp", order="desc") -> Callable[[], bytes]:
+    """Callable untuk st.download_button: file dibuat hanya saat diklik.
+
+    Tanpa ini Streamlit mengambil data ekspor setiap halaman Riwayat dirender,
+    bahkan saat tombol unduh belum disentuh.
+    """
+    if fmt not in EXPORT_META:
+        raise AppError("format harus csv, json, atau xlsx")
+
+    def build() -> bytes:
+        return export_bytes(fmt, det_query(label, min_conf, sort_by, order))[0]
+
+    return build
 
 
 # ------------------------------------------------- log retur / koreksi staf
@@ -905,8 +940,10 @@ def receipt_panel() -> None:
         if ss.receipt:
             st.success(f"Transaksi No. {ss.receipt['no']:04d} selesai")
             st.code(ss.receipt["text"], language=None)
-            st.download_button("Unduh struk (.txt)", ss.receipt["text"].encode("utf-8"),
-                               file_name=f"struk-{ss.receipt['no']:04d}.txt", mime="text/plain")
+            text = ss.receipt["text"]
+            st.download_button("Unduh struk (.txt)", lambda: text.encode("utf-8"),
+                               file_name=f"struk-{ss.receipt['no']:04d}.txt", mime="text/plain",
+                               on_click="ignore")
 
 
 def page_kasir(s: dict) -> None:
@@ -1000,20 +1037,20 @@ def page_riwayat() -> None:
         min_conf = e2.slider("Confidence minimum", 0.0, 1.0, 0.0, 0.05, key="e_conf")
         e_sort = e3.selectbox("Urut", list(DET_SORT), key="e_sort")
         e_order = e4.selectbox("Arah", ["desc", "asc"], key="e_order")
-        rows = det_query(label or None, min_conf, e_sort, e_order)
-        st.caption(f"{len(rows)} baris akan diekspor.")
+        st.caption(f"{det_count(label or None, min_conf)} baris akan diekspor.")
         d1, d2, d3 = st.columns(3)
         for col, fmt, text in ((d1, "csv", "Ekspor CSV"), (d2, "xlsx", "Ekspor Excel"), (d3, "json", "Ekspor JSON")):
-            data, mime, fname = export_bytes(fmt, rows)
-            col.download_button(text, data, file_name=fname, mime=mime, key=f"dl_{fmt}")
+            mime, fname = EXPORT_META[fmt]
+            col.download_button(text, deferred_export(fmt, label or None, min_conf, e_sort, e_order),
+                                file_name=fname, mime=mime, key=f"dl_{fmt}", on_click="ignore")
 
 
 def page_log() -> None:
     st.subheader("Barang afkir dan koreksi staf")
     c1, c2 = st.columns([3, 1])
     q = c1.text_input("Cari", placeholder="Cari buah atau tindakan", label_visibility="collapsed").lower()
-    c2.download_button("Unduh laporan retur CSV", waste_log_csv(), file_name="laporan_retur_supplier.csv",
-                       mime="text/csv")
+    c2.download_button("Unduh laporan retur CSV", waste_log_csv, file_name="laporan_retur_supplier.csv",
+                       mime="text/csv", on_click="ignore")
     rows = [r for r in waste_log() if not q or q in " ".join([r["fruit"], r["status"], r["action"]]).lower()]
     if rows:
         st.dataframe(pd.DataFrame([{

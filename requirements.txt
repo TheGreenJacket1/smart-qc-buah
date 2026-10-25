@@ -1,6 +1,7 @@
 # Aplikasi utama: Smart QC Buah versi Streamlit.
 # Versi lama (FastAPI) memakai requirements-fastapi.txt.
-streamlit>=1.40
+# 1.52+: data callable pada st.download_button (ekspor baru dibuat saat diklik).
+streamlit>=1.52
 streamlit-webrtc>=0.60
 av
 ultralytics
